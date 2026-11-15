@@ -1,0 +1,52 @@
+================================================================================
+CHIPYARD & FIREMARSHAL FULL SETUP PREREQUISITES (WSL / UBUNTU)
+================================================================================
+
+1. INSTALL SYSTEM DEPENDENCIES
+--------------------------------------------------------------------------------
+Install libguestfs-tools (required for FireMarshal guestmount image creation)
+and ensure WSL kernel permissions allow non-root access:
+
+    sudo apt-get update
+    sudo apt-get install -y libguestfs-tools
+    sudo chmod +r /boot/vmlinuz* 2>/dev/null || true
+
+
+2. CLONE REPOSITORY & INITIALIZE SUBMODULES
+--------------------------------------------------------------------------------
+Note: For best I/O performance on WSL, clone into native Linux storage (~/chipyard)
+rather than a Windows-mounted drive (/mnt/c or /mnt/f).
+
+    git clone <your-chipyard-fork-or-ucb-bar-url>
+    cd chipyard
+
+If cloning from a personal fork without forked sub-repositories, point relative
+submodule URLs back to ucb-bar:
+
+    git remote add upstream https://github.com/ucb-bar/chipyard.git
+    git fetch upstream
+    git submodule update --init --recursive
+
+
+3. RUN FULL CHIPYARD & FIREMARSHAL SETUP
+--------------------------------------------------------------------------------
+Builds the Conda environment, RISC-V toolchains (riscv-tools), Verilator,
+ctags, and pre-compiles the FireMarshal Buildroot Linux image (br-base):
+
+    ./build-setup.sh riscv-tools
+
+Recovery steps (if build-setup.sh exits early at Step 9 before generating env.sh):
+
+    ./software/firemarshal/marshal build br-base.json
+    ./build-setup.sh riscv-tools --skip-conda --skip-submodules --skip-toolchain --skip-firesim --skip-marshal --skip-ctags
+
+
+4. LOAD ENVIRONMENT & VERIFY
+--------------------------------------------------------------------------------
+Run this in the root chipyard directory whenever opening a new terminal session:
+
+    source env.sh
+
+Optional quick verification (boots br-base Linux in QEMU/Spike or runs Verilator):
+
+    marshal launch br-base.json
