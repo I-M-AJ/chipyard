@@ -1,0 +1,108 @@
+================================================================================
+Simple RISC-V SoC with SRAM, SROM (BootROM), and UART in Chipyard (WSL)
+================================================================================
+
+1. Environment Setup (WSL)
+--------------------------
+Open WSL in the Chipyard root directory and source the environment:
+
+    cd /mnt/f/Anamoly_detection/chipyard
+    source env.sh
+
+Verified tools inside `.conda-env`:
+  - verilator
+  - riscv64-unknown-elf-gcc
+  - riscv64-unknown-linux-gnu-gcc
+  - java, sbt, dtc, make, python3
+
+
+2. Custom SoC Configuration (`SimpleSRAMUARTConfig`)
+----------------------------------------------------
+File: generators/chipyard/src/main/scala/config/SimpleSoCConfig.scala
+
+Components:
+  - CPU: Single 64-bit RISC-V Rocket core (RV64IMAFDC) via `WithNHugeCores(1)`
+  - SRAM: 256 KiB on-chip MBUS scratchpad mapped at `0x80000000` via
+          `WithMbusScratchpad(base = 0x80000000L, size = 256 * 1024)`
+          (off-chip DRAM removed via `WithNoMemPort`)
+  - SROM (BootROM): 64 KiB BootROM at `0x10000` (inherited from `AbstractConfig`)
+  - UART: SiFive UART at `0x10020000` (inherited from `AbstractConfig`, connected
+          to `WithUARTAdapter` in the Verilator TestHarness so TX prints to stdout)
+
+
+3. Bare-Metal UART Hello World Program
+--------------------------------------
+Files:
+  - tests/uart_hello.c
+  - tests/CMakeLists.txt (added `uart_hello` executable, `NANO_TEST_TARGETS`, and `add_dump_target(uart_hello)`)
+
+How it works:
+  - Enables UART TX by writing `0x1` to `UART_TXCTRL` (`0x10020008`).
+  - Polls `UART_TXDATA` (`0x10020000`) bit 31 (`0x80000000`) until the TX FIFO has space,
+    then writes each character of `"Hello, World! (from RISC-V baremetal via UART)\r\n"`.
+  - Waits ~2.5M cycles via `rdcycle` so the UART TX FIFO finishes shifting out all bytes
+    at 115200 baud before `main()` returns and HTIF exits the simulation.
+
+Build the bare-metal ELF binary:
+    cd /mnt/f/Anamoly_detection/chipyard
+    source env.sh
+    cd tests
+    cmake -S ./ -B ./build/ -D CMAKE_BUILD_TYPE=Debug
+    cmake --build ./build/ --target uart_hello
+
+Output binary:
+    tests/build/uart_hello.riscv
+
+
+4. Building & Running in Verilator Simulation
+---------------------------------------------
+From WSL:
+    cd /mnt/f/Anamoly_detection/chipyard
+    source env.sh
+    cd sims/verilator
+    make -j$(nproc) CONFIG=SimpleSRAMUARTConfig run-binary BINARY=../../tests/build/uart_hello.riscv
+    
+What this does:
+  1. Elaborates `SimpleSRAMUARTConfig` via Chisel/sbt into Verilog (`generated-src/`).
+  2. Compiles the Verilator simulation executable (`simulator-chipyard.harness-SimpleSRAMUARTConfig`).
+  3. Loads `uart_hello.riscv` into the on-chip SRAM at `0x80000000`, boots from SROM (`0x10000`),
+     jumps to `0x80000000`, and prints the UART output directly to the terminal.
+
+Once `simulator-chipyard.harness-SimpleSRAMUARTConfig` is built, you can re-run binaries directly without invoking `make`:
+    ./simulator-chipyard.harness-SimpleSRAMUARTConfig ../../tests/build/uart_hello.riscv
+
+
+5. Troubleshooting Compilation & Build Errors Encountered
+-------------------------------------------------------
+A. `sbt` / `ZipFile$Source.initCEN` & Corrupt `.jar` Error:
+   Error:
+     - `java.util.zip.ZipFile$Source.initCEN`
+     - `scala.reflect.internal.FatalError: Error accessing .../generators/radiance/target/scala-2.13/radiance_2.13-0.1.jar`
+   Cause:
+     Two `make` / `sbt` processes ran concurrently in the same workspace, leaving a partially
+     written/corrupt `.jar` file in `generators/radiance/target/scala-2.13/`.
+   Fix:
+     1. Ensure only one `make` / `sbt` process is running (`pgrep -a java`).
+     2. Remove any corrupted `.jar` files under `generators/**/target/` and `tools/**/target/`:
+        python3 -c "import glob, zipfile, os; [os.remove(p) or print('Removed:', p) for p in glob.glob('/mnt/f/Anamoly_detection/chipyard/generators/**/target/**/*.jar', recursive=True) + glob.glob('/mnt/f/Anamoly_detection/chipyard/tools/**/target/**/*.jar', recursive=True) if not zipfile.is_zipfile(p)]"
+     3. Re-run `make` in a fresh WSL terminal.
+
+B. Chisel Elaboration `NoSuchElementException: key not found: Location(mbus)`:
+   Cause:
+     Adding `WithNBanks(0)` removed `mbus`, so `WithMbusScratchpad` could not attach to `mbus`.
+   Fix:
+     Remove `WithNBanks(0)` from `SimpleSRAMUARTConfig` in `SimpleSoCConfig.scala`
+     (matching Chipyard's `MbusScratchpadOnlyRocketConfig`).
+
+C. `Error: firtool not found in PATH`:
+   Cause:
+     CIRCT (`firtool-1.75.0`, specified in `conda-reqs/circt.json`) was not installed in `$RISCV`.
+     Also `tools/install-circt/bin/download-release-or-nightly-circt.sh` requires `-g <token>` even
+     though tagged releases do not use it.
+   Fix:
+     Download and extract `firtool-1.75.0` directly into `"$RISCV/"` (with `env.sh` sourced):
+       wget -O - https://github.com/llvm/circt/releases/download/firtool-1.75.0/circt-full-static-linux-x64.tar.gz | tar -zx -C "$RISCV/" --strip-components 1
+     Verify with:
+       which firtool && firtool --version
+
+
