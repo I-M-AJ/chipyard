@@ -106,3 +106,79 @@ C. `Error: firtool not found in PATH`:
        which firtool && firtool --version
 
 
+6. Booting Linux & Printing via UART on the Custom SoC
+------------------------------------------------------
+A. Analysis: Why `SimpleSRAMUARTConfig` Needs a Memory Change for Linux
+   - `SimpleSRAMUARTConfig` has only 256 KiB of on-chip SRAM at `0x80000000` and no off-chip
+     DRAM (`WithNoMemPort`).
+   - The prebuilt Buildroot Linux image (`software/firemarshal/images/firechip/br-base/br-base-bin`,
+     containing OpenSBI + Linux kernel + initramfs) is ~27 MiB and requires >= 128-256 MiB of
+     RAM at `0x80000000`.
+   - Instantiating 256 MiB of on-chip Chisel SRAM arrays in Verilator is impractical, so for
+     Linux simulation we keep the same RV64 Rocket core (which already has Sv39 MMU), SROM
+     (`0x10000`), on-chip SRAM scratchpad (`0x08000000`), and SiFive UART (`0x10020000`), and
+     enable simulated backing RAM at `0x80000000` (via `WithSimAXIMem` for fast 1-cycle memory
+     in Verilator, or default `SimDRAM` in `AbstractConfig`).
+
+B. Pre-installed Software / Images Check (Nothing Extra to Download)
+   Already present in your workspace:
+   - `software/firemarshal/marshal` (FireMarshal workload builder)
+   - `software/firemarshal/images/firechip/br-base/br-base-bin` (27 MiB OpenSBI + Linux + initramfs)
+   - `spike` (`riscv-isa-sim`, in `.conda-env/riscv-tools/bin/spike`)
+
+C. Step 1: Add `SimpleLinuxUARTConfig` to `SimpleSoCConfig.scala`
+   Add this config to `generators/chipyard/src/main/scala/config/SimpleSoCConfig.scala`:
+
+     class SimpleLinuxUARTConfig extends Config(
+       new chipyard.harness.WithSimAXIMem ++          // fast 1-cycle backing RAM at 0x80000000
+       new freechips.rocketchip.rocket.WithNHugeCores(1) ++ // RV64GC Rocket core (with Sv39 MMU)
+       new chipyard.config.AbstractConfig)            // includes SROM (0x10000), SRAM (0x08000000), UART (0x10020000)
+
+   Note: `AbstractConfig` embeds the Device Tree (DTS) in BootROM/SROM with `sifive,uart0` at
+   `0x10020000`, so Linux automatically attaches `/dev/ttySIF0` and prints boot logs & console
+   output via `WithUARTAdapter` to your terminal.
+
+D. Step 2: Build & Boot Linux in Verilator (UART Output on Terminal)
+   From WSL:
+     cd /mnt/f/Anamoly_detection/chipyard
+     source env.sh
+     cd sims/verilator
+     make -j$(nproc) CONFIG=SimpleLinuxUARTConfig run-binary \
+       BINARY=../../software/firemarshal/images/firechip/br-base/br-base-bin
+
+   (Note: `make run-binary` defaults to `+max-cycles=10000000`, which will time out at
+   `TestDriver.v:147` before the 27 MiB `br-base-bin` even finishes loading over Serial-TL!
+   Once `simulator-chipyard.harness-SimpleLinuxUARTConfig` is built, run it directly with
+   NO cycle timeout and NO `spike-dasm` overhead:
+     ./simulator-chipyard.harness-SimpleLinuxUARTConfig ../../software/firemarshal/images/firechip/br-base/br-base-bin
+   Booting Linux in Verilator RTL simulation takes ~10-30+ minutes; you will see OpenSBI
+   and Linux kernel boot messages printed via UART in your terminal. Once at the Linux prompt,
+   `echo "Hello World from Linux via UART" > /dev/ttySIF0` prints via UART.
+   To verify `br-base-bin` in ~2 seconds before waiting for Verilator:
+     spike ../../software/firemarshal/images/firechip/br-base/br-base-bin)
+
+E. Optional: Automated "Hello World" Linux Workload with FireMarshal
+   If you want Linux to automatically print a message via UART and power off without manual
+   interaction:
+   1. Create a workload dir `software/firemarshal/boards/firechip/base-workloads/uart-hello/`
+      with `run.sh`:
+        #!/bin/sh
+        echo "Hello, World! (from Linux on SimpleLinuxUARTConfig via UART)"
+        poweroff -f
+   2. Create `uart-hello.json` next to it:
+        {
+          "name" : "uart-hello",
+          "base" : "br-base.json",
+          "run" : "run.sh"
+        }
+   3. Build the image:
+        cd /mnt/f/Anamoly_detection/chipyard
+        source env.sh
+        ./software/firemarshal/marshal -v build software/firemarshal/boards/firechip/base-workloads/uart-hello.json
+   4. Run in Verilator:
+        cd sims/verilator
+        make -j$(nproc) CONFIG=SimpleLinuxUARTConfig run-binary \
+          BINARY=../../software/firemarshal/images/firechip/uart-hello/uart-hello-bin
+
+
+
